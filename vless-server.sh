@@ -7619,6 +7619,9 @@ parse_vless_link() {
     local content="${link#vless://}"
     local name="${content##*#}"
     name=$(printf '%b' "${name//%/\\x}")  # URL 解码
+    # 转义 JSON 特殊字符
+    name="${name//\\/\\\\}"
+    name="${name//\"/\\\"}"
     content="${content%%#*}"
     
     local uuid="${content%%@*}"
@@ -7657,10 +7660,23 @@ parse_vless_link() {
         esac
     done
     
-    # 输出 JSON 格式
-    cat << EOF
-{"type":"vless","name":"$name","server":"$server","port":"$port","uuid":"$uuid","security":"$security","transport":"$type","sni":"$sni","pbk":"$pbk","sid":"$sid","flow":"$flow","path":"$path","host":"$host","fp":"$fp"}
-EOF
+    # 输出 JSON 格式 (使用 jq 确保正确转义)
+    jq -nc \
+        --arg type "vless" \
+        --arg name "$name" \
+        --arg server "$server" \
+        --arg port "$port" \
+        --arg uuid "$uuid" \
+        --arg security "$security" \
+        --arg transport "$type" \
+        --arg sni "$sni" \
+        --arg pbk "$pbk" \
+        --arg sid "$sid" \
+        --arg flow "$flow" \
+        --arg path "$path" \
+        --arg host "$host" \
+        --arg fp "$fp" \
+        '{type:$type,name:$name,server:$server,port:$port,uuid:$uuid,security:$security,transport:$transport,sni:$sni,pbk:$pbk,sid:$sid,flow:$flow,path:$path,host:$host,fp:$fp}'
 }
 
 # 解析 vmess:// 链接
@@ -7959,22 +7975,23 @@ fetch_subscription() {
                 continue
             fi
             
-            # 解析属性
-            [[ "$line" =~ ^[[:space:]]*type:[[:space:]]*(.*) ]] && type="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*server:[[:space:]]*(.*) ]] && server="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*port:[[:space:]]*(.*) ]] && port="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*uuid:[[:space:]]*(.*) ]] && uuid="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*password:[[:space:]]*(.*) ]] && password="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*cipher:[[:space:]]*(.*) ]] && method="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*network:[[:space:]]*(.*) ]] && network="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*tls:[[:space:]]*(.*) ]] && tls="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*sni:[[:space:]]*(.*) ]] && sni="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*servername:[[:space:]]*(.*) ]] && sni="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*flow:[[:space:]]*(.*) ]] && flow="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*path:[[:space:]]*(.*) ]] && path="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*Host:[[:space:]]*(.*) ]] && host="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*public-key:[[:space:]]*(.*) ]] && pbk="${BASH_REMATCH[1]}"
-            [[ "$line" =~ ^[[:space:]]*short-id:[[:space:]]*(.*) ]] && sid="${BASH_REMATCH[1]}"
+            # 解析属性 (去掉引号)
+            _strip_quotes() { local v="$1"; v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"; echo "$v"; }
+            [[ "$line" =~ ^[[:space:]]*type:[[:space:]]*(.*) ]] && type=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*server:[[:space:]]*(.*) ]] && server=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*port:[[:space:]]*(.*) ]] && port=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*uuid:[[:space:]]*(.*) ]] && uuid=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*password:[[:space:]]*(.*) ]] && password=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*cipher:[[:space:]]*(.*) ]] && method=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*network:[[:space:]]*(.*) ]] && network=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*tls:[[:space:]]*(.*) ]] && tls=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*sni:[[:space:]]*(.*) ]] && sni=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*servername:[[:space:]]*(.*) ]] && sni=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*flow:[[:space:]]*(.*) ]] && flow=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*path:[[:space:]]*(.*) ]] && path=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*Host:[[:space:]]*(.*) ]] && host=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*public-key:[[:space:]]*(.*) ]] && pbk=$(_strip_quotes "${BASH_REMATCH[1]}")
+            [[ "$line" =~ ^[[:space:]]*short-id:[[:space:]]*(.*) ]] && sid=$(_strip_quotes "${BASH_REMATCH[1]}")
         done <<< "$content"
         
         # 处理最后一个节点
