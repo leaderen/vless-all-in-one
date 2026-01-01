@@ -1,6 +1,6 @@
 #!/bin/bash
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.1.0 [服务端]
+#  多协议代理一键部署脚本 v3.1.1 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -12,16 +12,18 @@
 #  插件支持: Snell v4/v5 和 SS2022 可选启用 ShadowTLS
 #  适配: Alpine/Debian/Ubuntu/CentOS
 #  
-#  v3.1.0 更新:
-#    • 新增配置管理功能 (导入/导出/IP迁移)
-#    • 修复主菜单分流状态显示问题
-#    • 修复分流管理页面自定义规则不显示域名的问题
+#  v3.1.1 更新:
+#    • 导入订阅预览阶段显示延迟检测，按延迟排序展示
+#    • 修复 IPv6 节点解析问题 (SS/VLESS/Trojan/Hysteria2)
+#    • 修复 IPv6 节点延迟检测，改用 ICMP ping 方式
+#    • 修复节点名称含特殊字符导致延迟检测失败的问题
+#    • 修复导入节点时误判"已存在"的问题
 #  
 #  作者: Chil30
 #  项目地址: https://github.com/Chil30/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.1.0"
+readonly VERSION="3.1.1"
 readonly AUTHOR="Chil30"
 readonly REPO_URL="https://github.com/Chil30/vless-all-in-one"
 readonly CFG="/etc/vless-reality"
@@ -4621,9 +4623,7 @@ warp_status() {
 download_wgcf() {
     # 检查是否已存在有效的 wgcf
     if [[ -x /usr/local/bin/wgcf ]]; then
-        if file /usr/local/bin/wgcf 2>/dev/null | grep -q "ELF"; then
-            return 0
-        fi
+        return 0
     fi
     
     local arch=$(uname -m)
@@ -4637,28 +4637,35 @@ download_wgcf() {
     [[ -z "$wgcf_ver" || "$wgcf_ver" == "null" ]] && wgcf_ver="2.2.29"
     echo -e " v${wgcf_ver}"
     
-    local wgcf_urls=(
-        "https://github.com/ViRb3/wgcf/releases/download/v${wgcf_ver}/wgcf_${wgcf_ver}_linux_${wgcf_arch}"
-        "https://mirror.ghproxy.com/https://github.com/ViRb3/wgcf/releases/download/v${wgcf_ver}/wgcf_${wgcf_ver}_linux_${wgcf_arch}"
-        "https://gh-proxy.com/https://github.com/ViRb3/wgcf/releases/download/v${wgcf_ver}/wgcf_${wgcf_ver}_linux_${wgcf_arch}"
-    )
+    local wgcf_url="https://github.com/ViRb3/wgcf/releases/download/v${wgcf_ver}/wgcf_${wgcf_ver}_linux_${wgcf_arch}"
     
     rm -f /usr/local/bin/wgcf
-    local try_num=1
-    for url in "${wgcf_urls[@]}"; do
-        echo -ne "  ${C}▸${NC} 下载 wgcf (尝试 $try_num/3)..."
-        if curl -fL -o /usr/local/bin/wgcf "$url" --connect-timeout 30 --max-time 120 2>/dev/null; then
-            if [[ -s /usr/local/bin/wgcf ]] && file /usr/local/bin/wgcf 2>/dev/null | grep -q "ELF"; then
-                chmod +x /usr/local/bin/wgcf
-                echo -e " ${G}✓${NC}"
-                return 0
-            fi
-        fi
-        echo -e " ${R}✗${NC}"
-        rm -f /usr/local/bin/wgcf
-        ((try_num++))
-    done
+    echo -e "  ${C}▸${NC} 下载 wgcf..."
+    echo -e "  ${D}$wgcf_url${NC}"
     
+    # 显示下载进度
+    if curl -fL -o /usr/local/bin/wgcf "$wgcf_url" --connect-timeout 30 --max-time 120 --progress-bar; then
+        if [[ -s /usr/local/bin/wgcf ]]; then
+            chmod +x /usr/local/bin/wgcf
+            local size=$(ls -lh /usr/local/bin/wgcf | awk '{print $5}')
+            echo -e "  ${G}✓${NC} 下载成功 (${size})"
+            return 0
+        else
+            echo -e "  ${R}✗${NC} 下载文件为空"
+        fi
+    else
+        local exit_code=$?
+        echo -e "  ${R}✗${NC} 下载失败 (curl 退出码: $exit_code)"
+        case $exit_code in
+            6)  echo -e "  ${D}原因: DNS 解析失败${NC}" ;;
+            7)  echo -e "  ${D}原因: 无法连接到服务器${NC}" ;;
+            28) echo -e "  ${D}原因: 连接超时${NC}" ;;
+            35) echo -e "  ${D}原因: SSL 连接错误${NC}" ;;
+            56) echo -e "  ${D}原因: 接收数据失败${NC}" ;;
+        esac
+    fi
+    
+    rm -f /usr/local/bin/wgcf
     _err "wgcf 下载失败"
     return 1
 }
@@ -7485,36 +7492,70 @@ add_quick_proxy() {
 check_node_latency() {
     local server="$1" port="$2"
     local resolved_ip="" latency=""
+    local is_ipv6=false
     
-    # 解析域名获取 IP
-    if [[ "$server" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        resolved_ip="$server"
+    # 清理地址（移除可能的方括号）
+    local clean_addr="$server"
+    clean_addr="${clean_addr#[}"
+    clean_addr="${clean_addr%]}"
+    
+    # 判断地址类型
+    if [[ "$clean_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        resolved_ip="$clean_addr"
+    elif [[ "$clean_addr" =~ : ]]; then
+        resolved_ip="$clean_addr"
+        is_ipv6=true
     else
-        resolved_ip=$(dig +short "$server" 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
-        [[ -z "$resolved_ip" ]] && resolved_ip=$(host "$server" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        # 域名解析
+        resolved_ip=$(dig +short "$clean_addr" A 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
+        if [[ -z "$resolved_ip" ]]; then
+            resolved_ip=$(dig +short "$clean_addr" AAAA 2>/dev/null | grep -E ':' | head -1)
+            [[ -n "$resolved_ip" ]] && is_ipv6=true
+        fi
     fi
     [[ -z "$resolved_ip" ]] && resolved_ip="-"
     
-    # 测试 TCP 连接延迟
-    local start_time end_time
-    start_time=$(date +%s%3N)
-    if timeout 3 bash -c "echo >/dev/tcp/$server/$port" 2>/dev/null; then
-        end_time=$(date +%s%3N)
-        latency=$((end_time - start_time))
+    if [[ "$is_ipv6" == "true" ]]; then
+        # IPv6: 用 ping6 检测 ICMP 延迟
+        local ping_result
+        ping_result=$(ping -6 -c 1 -W 3 "$clean_addr" 2>/dev/null | grep -oP 'time=\K[0-9.]+')
+        if [[ -n "$ping_result" ]]; then
+            # 取整数部分
+            latency="${ping_result%.*}"
+            [[ -z "$latency" ]] && latency="$ping_result"
+        else
+            latency="超时"
+        fi
     else
-        latency="超时"
+        # IPv4: 用 TCP 检测
+        local start_time end_time
+        start_time=$(date +%s%3N)
+        
+        if command -v nc &>/dev/null; then
+            if timeout 3 nc -z -w 2 "$clean_addr" "$port" 2>/dev/null; then
+                end_time=$(date +%s%3N)
+                latency=$((end_time - start_time))
+            else
+                latency="超时"
+            fi
+        elif timeout 3 bash -c "echo >/dev/tcp/$clean_addr/$port" 2>/dev/null; then
+            end_time=$(date +%s%3N)
+            latency=$((end_time - start_time))
+        else
+            # 回退到 curl
+            local curl_addr="$clean_addr"
+            curl -so /dev/null --connect-timeout 3 -m 3 "http://${curl_addr}:${port}/" 2>/dev/null
+            local curl_exit=$?
+            if [[ $curl_exit -eq 0 || $curl_exit -eq 7 || $curl_exit -eq 52 || $curl_exit -eq 56 ]]; then
+                end_time=$(date +%s%3N)
+                latency=$((end_time - start_time))
+            else
+                latency="超时"
+            fi
+        fi
     fi
     
     echo "${latency}|${resolved_ip}"
-}
-
-# 批量检测节点延迟 (返回纯结果，不带进度)
-check_all_nodes_latency_silent() {
-    local nodes="$1"
-    while IFS='|' read -r name type server port; do
-        [[ -z "$server" ]] && continue
-        check_node_latency "$server" "$port"
-    done < <(echo "$nodes" | jq -r '.[] | "\(.name)|\(.type)|\(.server)|\(.port)"')
 }
 
 # 数据库：链式代理节点操作
@@ -7563,15 +7604,33 @@ parse_proxy_link() {
                 local decoded=$(echo "$userinfo" | base64 -d 2>/dev/null)
                 method="${decoded%%:*}"
                 password="${decoded#*:}"
-                host="${hostport%%:*}"
-                port="${hostport##*:}"
+                
+                # 处理 IPv6 地址 (带方括号)
+                if [[ "$hostport" == "["* ]]; then
+                    # IPv6: [地址]:端口
+                    host="${hostport%%]:*}"
+                    host="${host#[}"  # 移除开头的 [
+                    port="${hostport##*]:}"
+                else
+                    # IPv4 或域名
+                    host="${hostport%%:*}"
+                    port="${hostport##*:}"
+                fi
             else
                 # 旧格式: 整体 base64
                 local decoded=$(echo "$encoded" | base64 -d 2>/dev/null)
                 method=$(echo "$decoded" | cut -d: -f1)
                 password=$(echo "$decoded" | cut -d: -f2 | cut -d@ -f1)
-                host=$(echo "$decoded" | cut -d@ -f2 | cut -d: -f1)
-                port=$(echo "$decoded" | cut -d: -f3)
+                local hostport=$(echo "$decoded" | cut -d@ -f2)
+                # 处理 IPv6
+                if [[ "$hostport" == "["* ]]; then
+                    host="${hostport%%]:*}"
+                    host="${host#[}"
+                    port="${hostport##*]:}"
+                else
+                    host="${hostport%%:*}"
+                    port="${hostport##*:}"
+                fi
             fi
             
             # 确保 port 是纯数字
@@ -7620,8 +7679,16 @@ parse_proxy_link() {
             uuid="${content%%@*}"
             local hostpart="${content#*@}"
             hostpart="${hostpart%%\?*}"
-            host="${hostpart%%:*}"
-            port="${hostpart##*:}"
+            
+            # 处理 IPv6 地址
+            if [[ "$hostpart" == "["* ]]; then
+                host="${hostpart%%]:*}"
+                host="${host#[}"
+                port="${hostpart##*]:}"
+            else
+                host="${hostpart%%:*}"
+                port="${hostpart##*:}"
+            fi
             
             # 确保 port 是纯数字
             port=$(echo "$port" | tr -d '"' | tr -d ' ')
@@ -7655,8 +7722,16 @@ parse_proxy_link() {
             password="${content%%@*}"
             local hostpart="${content#*@}"
             hostpart="${hostpart%%\?*}"
-            host="${hostpart%%:*}"
-            port="${hostpart##*:}"
+            
+            # 处理 IPv6 地址
+            if [[ "$hostpart" == "["* ]]; then
+                host="${hostpart%%]:*}"
+                host="${host#[}"
+                port="${hostpart##*]:}"
+            else
+                host="${hostpart%%:*}"
+                port="${hostpart##*:}"
+            fi
             
             # 确保 port 是纯数字
             port=$(echo "$port" | tr -d '"' | tr -d ' ')
@@ -7681,8 +7756,16 @@ parse_proxy_link() {
             password="${content%%@*}"
             local hostpart="${content#*@}"
             hostpart="${hostpart%%\?*}"
-            host="${hostpart%%:*}"
-            port="${hostpart##*:}"
+            
+            # 处理 IPv6 地址
+            if [[ "$hostpart" == "["* ]]; then
+                host="${hostpart%%]:*}"
+                host="${host#[}"
+                port="${hostpart##*]:}"
+            else
+                host="${hostpart%%:*}"
+                port="${hostpart##*:}"
+            fi
             
             # 确保 port 是纯数字
             port=$(echo "$port" | tr -d '"' | tr -d ' ')
@@ -8165,9 +8248,11 @@ _import_subscription_interactive() {
         fi
         
         local name=$(echo "$node" | jq -r '.name' 2>/dev/null)
+        [[ -z "$name" ]] && { ((failed++)); continue; }
         
-        # 检查是否已存在
-        if db_get_chain_node "$name" | jq -e . >/dev/null 2>&1; then
+        # 检查是否已存在（用 jq 直接在数据库中查找）
+        local exists=$(jq -r --arg n "$name" '.chain_proxy.nodes // [] | map(select(.name == $n)) | length' "$DB_FILE" 2>/dev/null)
+        if [[ "$exists" -gt 0 ]]; then
             ((skipped++))
             continue
         fi
@@ -8278,7 +8363,7 @@ manage_chain_proxy() {
                 # 先收集所有节点信息到临时文件
                 local tmp_results=$(mktemp)
                 local i=0
-                while IFS='|' read -r name type server port; do
+                while IFS=$'\t' read -r name type server port; do
                     [[ -z "$server" ]] && continue
                     local result=$(check_node_latency "$server" "$port")
                     local latency="${result%%|*}"
@@ -8288,7 +8373,7 @@ manage_chain_proxy() {
                     echo "${latency_num}|${latency}|${name}|${type}|${resolved_ip}" >> "$tmp_results"
                     ((i++))
                     printf "\r  ${C}▸${NC} 检测中... (%d/%d)  " "$i" "$count" >&2
-                done < <(echo "$nodes" | jq -r '.[] | "\(.name)|\(.type)|\(.server)|\(.port)"')
+                done < <(echo "$nodes" | jq -r '.[] | "\(.name)\t\(.type)\t\(.server)\t\(.port)"')
                 
                 echo ""
                 _ok "延迟检测完成 ($count 个节点)"
