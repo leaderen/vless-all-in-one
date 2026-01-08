@@ -6486,11 +6486,11 @@ _select_outbound() {
     
     # 链式代理节点
     if [[ "$node_count" -gt 0 ]]; then
-        while IFS='|' read -r name type server port; do
+        while IFS=$'\t' read -r name type server port; do
             [[ -z "$name" ]] && continue
             outbounds+=("chain:${name}")
-            display_names+=("${name}|${type}|${server}|${port}")
-        done < <(echo "$nodes" | jq -r '.[] | "\(.name)|\(.type)|\(.server)|\(.port)"')
+            display_names+=("${name}"$'\t'"${type}"$'\t'"${server}"$'\t'"${port}")
+        done < <(echo "$nodes" | jq -r '.[] | [.name, .type, .server, .port] | @tsv')
     fi
     
     # 检测延迟（跳过直连和 WARP）
@@ -6512,9 +6512,9 @@ _select_outbound() {
         if [[ "$info" == "DIRECT" || "$info" == "WARP" ]]; then
             latency_results+=("-|$info|-")
         else
-            local node_type=$(echo "$info" | cut -d'|' -f2)
-            local server=$(echo "$info" | cut -d'|' -f3)
-            local port=$(echo "$info" | cut -d'|' -f4)
+            local node_type=$(echo "$info" | cut -d$'\t' -f2)
+            local server=$(echo "$info" | cut -d$'\t' -f3)
+            local port=$(echo "$info" | cut -d$'\t' -f4)
             local result=$(check_node_latency "$server" "$port" "$node_type" 2>/dev/null)
             latency_results+=("$result")
         fi
@@ -6540,8 +6540,9 @@ _select_outbound() {
         elif [[ "$info" == "WARP" ]]; then
             sort_data+=("0|$i|WARP|WARP|warp|-")
         else
-            local name=$(echo "$info" | cut -d'|' -f1)
-            local type=$(echo "$info" | cut -d'|' -f2)
+            # display_names 用 tab 分隔: name\ttype\tserver\tport
+            local name=$(echo "$info" | cut -d$'\t' -f1)
+            local type=$(echo "$info" | cut -d$'\t' -f2)
             local latency="${result%%|*}"
             local resolved_ip="${result##*|}"
             
@@ -9731,7 +9732,8 @@ manage_chain_proxy() {
                 # 先收集所有节点信息到临时文件
                 local tmp_results=$(mktemp)
                 local i=0
-                while IFS='|' read -r name type server port; do
+                # 使用 tab 分隔避免节点名称中的 | 干扰解析
+                while IFS=$'\t' read -r name type server port; do
                     [[ -z "$server" ]] && continue
                     local result=$(check_node_latency "$server" "$port" "$type")
                     local latency="${result%%|*}"
@@ -9741,7 +9743,7 @@ manage_chain_proxy() {
                     echo "${latency_num}|${latency}|${name}|${type}|${resolved_ip}" >> "$tmp_results"
                     ((i++))
                     printf "\r  ${C}▸${NC} 检测中... (%d/%d)  " "$i" "$count" >&2
-                done < <(echo "$nodes" | jq -r '.[] | "\(.name)|\(.type)|\(.server)|\(.port)"')
+                done < <(echo "$nodes" | jq -r '.[] | [.name, .type, .server, .port] | @tsv')
                 
                 echo ""
                 _ok "延迟检测完成 ($count 个节点)"
@@ -14459,6 +14461,7 @@ show_logs() {
             else
                 _warn "日志文件不存在"
             fi
+            _pause
             ;;
         2)
             _line
@@ -14469,6 +14472,7 @@ show_logs() {
             else
                 _warn "Watchdog 日志文件不存在"
             fi
+            _pause
             ;;
         3)
             show_service_logs
@@ -14601,6 +14605,7 @@ show_service_logs() {
             journalctl --no-pager -n 50 2>/dev/null | grep -iE "$proc_name|$service_name" || _warn "未找到相关日志"
         fi
     fi
+    _pause
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
